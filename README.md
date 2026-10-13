@@ -9,8 +9,8 @@ Gbauto automatically assigns and removes roles based on active invites and serve
 | Bronze | 5+ | — |
 | Silver | 10+ | 1 confirmed active boost |
 | Gold | 20+ | 2+ confirmed active boosts |
-| Premium | 33+ | — |
-| Diamond | Configurable | — |
+| Diamond | 33+ | — |
+| Premium | 40+ | — |
 
 Invite roles use the highest threshold reached. Invite counts include only invited members who are still in the server. Boost roles are evaluated separately, so a member can qualify through invites and/or boosts.
 
