@@ -262,13 +262,44 @@ client.on(Events.MessageCreate, async (message) => {
   const cmd = args.shift()?.toLowerCase();
 
   const isAdmin = message.member.permissions.has(PermissionFlagsBits.Administrator);
+  const isStaff = getConfig(`staff_${message.guild.id}_${message.author.id}`, '0') === '1';
 
   if (cmd === 'help') {
+    const lines = [
+      '**Member commands**',
+      '`!help` — show this help',
+      '`!invites [@member]` — view active invite count',
+      '',
+      '**Administrator commands**',
+      '`!panel` — publish the invite/boost panel',
+      '`!config` — view configured role IDs',
+      '`!boosts set @member <1|2>` — confirm active boosts',
+      '`!bronze set <roleId>`, `!silver set <roleId>`, `!gold set <roleId>`, `!diamond set <roleId>`, `!premium set <roleId>` — configure reward roles',
+      '`!staff @member` — grant staff access',
+      '`!staff remove @member` — revoke staff access'
+    ];
+    if (isAdmin) lines.push('', '**Your access**: Administrator');
+    else if (isStaff) lines.push('', '**Your access**: Staff (no additional staff workflow commands are currently implemented).');
     const embed = new EmbedBuilder()
       .setTitle('Gbauto — Help & Commands')
-      .setDescription('Member commands: `!panel`, `!invites [member]`, `!help`.\\n\\nAdmins can configure invite thresholds with `!bronze set <number>`, `!silver set <number>`, `!gold set <number>`, `!diamond set <number>`, and `!premium set <number>`.\\n\\nSet the number of boosts required for Gold with `!boosts set <number>`. Confirm a member boost count with `!boosts confirm member <number>`.\\n\\nUse `!roleid <role> set <roleId>` to configure Discord role IDs and `!config` to view them.')
+      .setDescription(lines.join('\\n'))
       .setColor(0x5865F2);
     return message.reply({ embeds: [embed] });
+  }
+
+  // Staff access can only be granted or revoked by administrators.
+  if (cmd === 'staff') {
+    if (!isAdmin) return message.reply('Administrators only.');
+    const target = message.mentions.members.first();
+    const action = args[0]?.toLowerCase();
+    if (!target) return message.reply('Usage: `!staff @member` or `!staff remove @member`.');
+    if (target.id === message.author.id) return message.reply('You cannot change your own staff access.');
+    if (action === 'remove') {
+      db.prepare('DELETE FROM config WHERE key = ?').run(`staff_${message.guild.id}_${target.id}`);
+      return message.reply(`Staff access removed for ${target}.`);
+    }
+    setConfig(`staff_${message.guild.id}_${target.id}`, '1');
+    return message.reply(`Staff access granted to ${target}. Staff-specific request commands are not implemented yet.`);
   }
 
   // ---- !panel ----
