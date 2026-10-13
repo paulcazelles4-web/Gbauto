@@ -265,6 +265,7 @@ client.on(Events.MessageCreate, async (message) => {
   const isStaff = getConfig(`staff_${message.guild.id}_${message.author.id}`, '0') === '1';
 
   if (cmd === 'help') {
+    if (!isAdmin && !isStaff) return message.reply('Members can use only `!invites`.');
     const lines = [
       '**Member commands**',
       '`!help` — show this help',
