@@ -266,25 +266,40 @@ client.on(Events.MessageCreate, async (message) => {
 
   if (cmd === 'help') {
     if (!isAdmin && !isStaff) return message.reply('Members can use only `!invites`.');
-    const lines = [
-      '**Member commands**',
-      '`!help` — show this help',
-      '`!invites [@member]` — view active invite count',
-      '',
-      '**Administrator commands**',
-      '`!panel` — publish the invite/boost panel',
-      '`!config` — view configured role IDs',
-      '`!boosts set @member <1|2>` — confirm active boosts',
-      '`!bronze set <roleId>`, `!silver set <roleId>`, `!gold set <roleId>`, `!diamond set <roleId>`, `!premium set <roleId>` — configure reward roles',
-      '`!staff @member` — grant staff access',
-      '`!staff remove @member` — revoke staff access'
-    ];
-    if (isAdmin) lines.push('', '**Your access**: Administrator');
-    else if (isStaff) lines.push('', '**Your access**: Staff (no additional staff workflow commands are currently implemented).');
+
     const embed = new EmbedBuilder()
-      .setTitle('Gbauto — Help & Commands')
-      .setDescription(lines.join('\\n'))
-      .setColor(0x5865F2);
+      .setTitle('Gbauto | Aide et commandes')
+      .setDescription([
+        '**COMMANDES GÉNÉRALES**',
+        '• `!invites [@membre]` — voir les invitations actives',
+        '',
+        ...(isAdmin ? [
+          '**ADMINISTRATION**',
+          '• `!panel` — publier le panneau de récompenses',
+          '• `!config` — afficher la configuration des rôles',
+          '• `!boosts set @membre <1|2>` — confirmer les boosts',
+          '',
+          '**RÔLES DE RÉCOMPENSE**',
+          '• `!bronze set <roleId>`',
+          '• `!silver set <roleId>`',
+          '• `!gold set <roleId>`',
+          '• `!diamond set <roleId>`',
+          '• `!premium set <roleId>`',
+          '',
+          '**GESTION DU STAFF**',
+          '• `!staff @membre` — accorder l’accès staff',
+          '• `!staff remove @membre` — retirer l’accès staff'
+        ] : [
+          '**ACCÈS STAFF**',
+          'Les commandes de gestion des demandes ne sont pas encore disponibles.'
+        ]),
+        '',
+        '**RÉCOMPENSES**',
+        'Utilisez le panneau de récompenses pour réclamer votre rôle.'
+      ].join('\n'))
+      .setColor(0x5865F2)
+      .setFooter({ text: isAdmin ? 'Accès administrateur' : 'Accès staff' });
+
     return message.reply({ embeds: [embed] });
   }
 
@@ -365,30 +380,15 @@ client.on(Events.MessageCreate, async (message) => {
   if (cmd === 'config') {
     if (!isAdmin) return message.reply('Administrators only.');
 
-    const lines = [
-      '**COMMANDES GÉNÉRALES**',
-      '`!invites [@membre]` — afficher les invitations actives',
-      '',
-      '**COMMANDES ADMINISTRATEUR**',
-      '`!panel` — publier le panneau de récompenses',
-      '`!config` — afficher les identifiants des rôles configurés',
-      '`!boosts set @membre <1|2>` — confirmer les boosts actifs',
-      '',
-      '**RÔLES DE RÉCOMPENSE**',
-      '`!bronze set <roleId>` · `!silver set <roleId>` · `!gold set <roleId>`',
-      '`!diamond set <roleId>` · `!premium set <roleId>`',
-      '',
-      '**GESTION DU STAFF**',
-      '`!staff @membre` — accorder l’accès staff',
-      '`!staff remove @membre` — retirer l’accès staff'
-    ];
-    if (isAdmin) lines.push('', '**VOTRE ACCÈS : ADMINISTRATEUR**');
-    else if (isStaff) lines.push('', '**VOTRE ACCÈS : STAFF**', 'Les commandes de gestion des demandes ne sont pas encore disponibles.');
+    const keys = ['bronze', 'silver', 'gold', 'diamond', 'premium'];
+    const lines = keys.map(key => {
+      const roleId = getConfig(`role_${message.guild.id}_${key}`, '');
+      return `**${key[0].toUpperCase() + key.slice(1)}:** ${roleId ? `<@&${roleId}>` : 'Not configured'}`;
+    });
     const embed = new EmbedBuilder()
-      .setTitle('Gbauto • Aide et commandes')
+      .setTitle('Gbauto | Configuration des rôles')
       .setDescription(lines.join('\n'))
-      .setColor(0x5865F2)
-      .setFooter({ text: 'Gbauto • Aide rapide' });
+      .setColor(0x5865F2);
     return message.reply({ embeds: [embed] });
   }
 
