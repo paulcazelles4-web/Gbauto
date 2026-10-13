@@ -237,7 +237,7 @@ client.on(Events.GuildMemberRemove, async (member) => {
     db.prepare('DELETE FROM invites WHERE guild_id = ? AND invited_id = ?')
       .run(guild.id, member.id);
 
-    // Resync the inviter
+    // Recalculate the inviter's roles
     const inviterMember = await guild.members.fetch(row.inviter_id).catch(() => null);
     if (inviterMember) await syncMemberRoles(inviterMember);
   }
@@ -359,14 +359,14 @@ client.on(Events.MessageCreate, async (message) => {
 
     const roleId = args[1];
     if (!roleId || !/^\d{17,20}$/.test(roleId)) {
-      return message.reply(`Usage : \`!${cmd} set <roleId>\``);
+      return message.reply(`Usage: !${cmd} set <roleId>`);
     }
 
     const role = message.guild.roles.cache.get(roleId);
     if (!role) return message.reply('Role not found on this server.');
 
     setConfig(`role_${cmd}`, roleId);
-    return message.reply(`**${cmd}** role updated → ${role}`);
+    return message.reply(`The **${cmd}** role was updated to ${role}.`);
   }
 });
 
@@ -409,7 +409,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         `You are currently boosting this server.\n` +
         `Confirmed boost count: **${result.confirmedBoostCount >= 2 ? '2+' : '1'}**.\n` +
         `Boost role granted / verified: **${result.confirmedBoostCount >= 2 ? 'Gold' : 'Silver'}**.\n\n` +
-        `*Discord does not expose each member's exact boost count to bots. An administrator can confirm 2+ boosts with \\`!boosts set @member 2\\`.*`
+        `*Discord does not expose each member's exact boost count to bots. An administrator can confirm 2+ boosts with the command !boosts set @member 2.*`
       );
     } else {
       await interaction.editReply(
