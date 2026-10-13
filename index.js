@@ -263,6 +263,14 @@ client.on(Events.MessageCreate, async (message) => {
 
   const isAdmin = message.member.permissions.has(PermissionFlagsBits.Administrator);
 
+  if (cmd === 'help') {
+    const embed = new EmbedBuilder()
+      .setTitle('Gbauto — Help & Commands')
+      .setDescription('Member commands: `!panel`, `!invites [member]`, `!help`.\\n\\nAdmins can configure invite thresholds with `!bronze set <number>`, `!silver set <number>`, `!gold set <number>`, `!diamond set <number>`, and `!premium set <number>`.\\n\\nSet the number of boosts required for Gold with `!boosts set <number>`. Confirm a member boost count with `!boosts confirm member <number>`.\\n\\nUse `!roleid <role> set <roleId>` to configure Discord role IDs and `!config` to view them.')
+      .setColor(0x5865F2);
+    return message.reply({ embeds: [embed] });
+  }
+
   // ---- !panel ----
   if (cmd === 'panel') {
     if (!isAdmin) return message.reply('Only administrators can post the panel.');
