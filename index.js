@@ -69,12 +69,12 @@ function getRoleId(name) {
 }
 
 // Invite thresholds
-const INVITE_THRESHOLDS = [
-  { count: 33, role: 'premium' },
-  { count: 20, role: 'gold' },
-  { count: 10, role: 'silver' },
-  { count: 5, role: 'bronze' }
-];
+const DEFAULT_INVITE_THRESHOLDS = { bronze: 5, silver: 10, gold: 20, diamond: 30, premium: 33 };
+for (const [name, count] of Object.entries(DEFAULT_INVITE_THRESHOLDS)) if (!getConfig(`invite_threshold_${name}`)) setConfig(`invite_threshold_${name}`, count);
+if (!getConfig('boost_threshold')) setConfig('boost_threshold', 2);
+function getInviteThresholds() {
+  return Object.keys(DEFAULT_INVITE_THRESHOLDS).map(role => ({ role, count: Number(getConfig(`invite_threshold_${role}`, DEFAULT_INVITE_THRESHOLDS[role])) })).filter(x => x.count > 0).sort((a,b) => b.count-a.count);
+}
 
 // ==================== CLIENT ====================
 const client = new Client({
@@ -119,9 +119,7 @@ function getActiveInviteCount(guildId, userId) {
 }
 
 function getInviteRoleForCount(count) {
-  for (const t of INVITE_THRESHOLDS) {
-    if (count >= t.count) return t.role;
-  }
+  for (const t of getInviteThresholds()) if (count >= t.count) return t.role;
   return null;
 }
 
@@ -140,7 +138,8 @@ async function syncMemberRoles(member) {
 
   // Boost roles: Discord does not expose individual boost counts, so admins confirm 2+.
   const confirmedBoostCount = Number(getConfig(`boost_count_${guild.id}_${member.id}`, '1'));
-  if (isBoosting) wantedRoles.add(confirmedBoostCount >= 2 ? 'gold' : 'silver');
+  const requiredBoostCount = Number(getConfig('boost_threshold', '2'));
+  if (isBoosting) wantedRoles.add(confirmedBoostCount >= requiredBoostCount ? 'gold' : 'silver');
 
   const allManaged = ['bronze', 'silver', 'gold', 'diamond', 'premium'];
   const rolesToAdd = [];
