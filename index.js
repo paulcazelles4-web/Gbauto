@@ -296,7 +296,7 @@ client.on(Events.MessageCreate, async (message) => {
         '',
         '**REWARDS**',
         'Use the rewards panel to claim your role.'
-      ].join('\\n'))
+      ].join('\n'))
       .setColor(0x5865F2)
       .setFooter({ text: isAdmin ? 'Administrator access' : 'Staff access' });
 
