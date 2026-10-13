@@ -365,17 +365,30 @@ client.on(Events.MessageCreate, async (message) => {
   if (cmd === 'config') {
     if (!isAdmin) return message.reply('Administrators only.');
 
-    const lines = ['bronze', 'silver', 'gold', 'diamond', 'premium'].map(n => {
-      const id = getRoleId(n);
-      const role = message.guild.roles.cache.get(id);
-      return `**${n}**: ${role ? role.toString() : '`' + id + '` (not found)'}`;
-    });
-
+    const lines = [
+      '**COMMANDES GÉNÉRALES**',
+      '`!invites [@membre]` — afficher les invitations actives',
+      '',
+      '**COMMANDES ADMINISTRATEUR**',
+      '`!panel` — publier le panneau de récompenses',
+      '`!config` — afficher les identifiants des rôles configurés',
+      '`!boosts set @membre <1|2>` — confirmer les boosts actifs',
+      '',
+      '**RÔLES DE RÉCOMPENSE**',
+      '`!bronze set <roleId>` · `!silver set <roleId>` · `!gold set <roleId>`',
+      '`!diamond set <roleId>` · `!premium set <roleId>`',
+      '',
+      '**GESTION DU STAFF**',
+      '`!staff @membre` — accorder l’accès staff',
+      '`!staff remove @membre` — retirer l’accès staff'
+    ];
+    if (isAdmin) lines.push('', '**VOTRE ACCÈS : ADMINISTRATEUR**');
+    else if (isStaff) lines.push('', '**VOTRE ACCÈS : STAFF**', 'Les commandes de gestion des demandes ne sont pas encore disponibles.');
     const embed = new EmbedBuilder()
-      .setTitle('Role Configuration')
+      .setTitle('Gbauto • Aide et commandes')
       .setDescription(lines.join('\n'))
-      .setColor(0xFEE75C);
-
+      .setColor(0x5865F2)
+      .setFooter({ text: 'Gbauto • Aide rapide' });
     return message.reply({ embeds: [embed] });
   }
 
