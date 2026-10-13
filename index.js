@@ -51,7 +51,7 @@ function setConfig(key, value) {
     .run(key, String(value));
 }
 
-// Valeurs par defaut (celles que tu as donnees)
+// Default role IDs
 const DEFAULT_ROLES = {
   bronze: process.env.ROLE_BRONZE || '1487902274435944531',
   silver: process.env.ROLE_SILVER || '1487902274435944532',
@@ -68,7 +68,7 @@ function getRoleId(name) {
   return getConfig(`role_${name}`, DEFAULT_ROLES[name]);
 }
 
-// Seuils invites
+// Invite thresholds
 const INVITE_THRESHOLDS = [
   { count: 33, role: 'premium' },
   { count: 20, role: 'gold' },
@@ -88,7 +88,7 @@ const client = new Client({
   partials: [Partials.GuildMember]
 });
 
-// Cache invites en memoire (pour detecter qui a invite)
+// In-memory invite cache (used to detect inviters)
 const inviteCache = new Map(); // guildId -> Map<code, {uses, inviterId}>
 
 // ==================== HELPERS ====================
@@ -106,7 +106,7 @@ async function cacheGuildInvites(guild) {
     }
     inviteCache.set(guild.id, map);
   } catch (e) {
-    console.error(`[Invites] Impossible de fetch les invites de ${guild.name}:`, e.message);
+    console.error(`[Invites] Could not fetch invites for ${guild.name}:`, e.message);
   }
 }
 
@@ -134,12 +134,13 @@ async function syncMemberRoles(member) {
 
   const wantedRoles = new Set();
 
-  // Roles via invites
+  // Invite-based roles
   const inviteRoleName = getInviteRoleForCount(inviteCount);
   if (inviteRoleName) wantedRoles.add(inviteRoleName);
 
-  // Role via boost (Silver si boost actif)
-  if (isBoosting) wantedRoles.add('silver');
+  // Boost roles: Discord does not expose individual boost counts, so admins confirm 2+.
+  const confirmedBoostCount = Number(getConfig(`boost_count_${guild.id}_${member.id}`, '1'));
+  if (isBoosting) wantedRoles.add(confirmedBoostCount >= 2 ? 'gold' : 'silver');
 
   const allManaged = ['bronze', 'silver', 'gold', 'diamond', 'premium'];
   const rolesToAdd = [];
@@ -160,21 +161,21 @@ async function syncMemberRoles(member) {
 
   try {
     if (rolesToAdd.length) await member.roles.add(rolesToAdd, 'Gbauto: eligible');
-    if (rolesToRemove.length) await member.roles.remove(rolesToRemove, 'Gbauto: plus eligible');
+    if (rolesToRemove.length) await member.roles.remove(rolesToRemove, 'Gbauto: no longer eligible');
   } catch (e) {
-    console.error(`[Roles] Erreur sync pour ${member.user.tag}:`, e.message);
+    console.error(`[Roles] Sync failed for ${member.user.tag}:`, e.message);
   }
 
-  return { inviteCount, isBoosting, wantedRoles: [...wantedRoles] };
+  return { inviteCount, isBoosting, confirmedBoostCount, wantedRoles: [...wantedRoles] };
 }
 
 // ==================== EVENTS ====================
 client.once(Events.ClientReady, async () => {
-  console.log(`Connecte en tant que ${client.user.tag}`);
+  console.log(`Logged in as ${client.user.tag}`);
 
   for (const guild of client.guilds.cache.values()) {
     await cacheGuildInvites(guild);
-    console.log(`Cache invites charge pour ${guild.name}`);
+    console.log(`Invite cache loaded for ${guild.name}`);
   }
 });
 
@@ -207,7 +208,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
       }
     }
 
-    // Mettre a jour le cache
+    // Update the cache
     await cacheGuildInvites(guild);
 
     if (inviterId) {
@@ -216,7 +217,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
         VALUES (?, ?, ?, ?)
       `).run(guild.id, inviterId, member.id, Date.now());
 
-      // Sync le role de l'inviteur
+      // Sync the inviter's roles
       const inviterMember = await guild.members.fetch(inviterId).catch(() => null);
       if (inviterMember) await syncMemberRoles(inviterMember);
     }
@@ -228,7 +229,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
 client.on(Events.GuildMemberRemove, async (member) => {
   const guild = member.guild;
 
-  // Retirer l'entree invite si cette personne avait ete invitee
+  // Remove this member's invite record, if they were invited by someone
   const row = db.prepare('SELECT inviter_id FROM invites WHERE guild_id = ? AND invited_id = ?')
     .get(guild.id, member.id);
 
@@ -236,18 +237,19 @@ client.on(Events.GuildMemberRemove, async (member) => {
     db.prepare('DELETE FROM invites WHERE guild_id = ? AND invited_id = ?')
       .run(guild.id, member.id);
 
-    // Resync l'inviteur
+    // Resync the inviter
     const inviterMember = await guild.members.fetch(row.inviter_id).catch(() => null);
     if (inviterMember) await syncMemberRoles(inviterMember);
   }
 });
 
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
-  // Detection boost ajoute / retire
+  // Detect boost started / stopped
   const wasBoosting = !!oldMember.premiumSince;
   const isBoosting = !!newMember.premiumSince;
 
   if (wasBoosting !== isBoosting) {
+    if (!isBoosting) db.prepare('DELETE FROM config WHERE key = ?').run(`boost_count_${newMember.guild.id}_${newMember.id}`);
     await syncMemberRoles(newMember);
   }
 });
@@ -264,23 +266,24 @@ client.on(Events.MessageCreate, async (message) => {
 
   // ---- !panel ----
   if (cmd === 'panel') {
-    if (!isAdmin) return message.reply('Seuls les administrateurs peuvent envoyer le panel.');
+    if (!isAdmin) return message.reply('Only administrators can post the panel.');
 
     const embed = new EmbedBuilder()
-      .setTitle('Récompenses Invites & Boosts')
+      .setTitle('Invite & Boost Rewards')
       .setDescription(
-        'Clique sur un bouton ci-dessous pour **claim** ton rôle selon tes stats **actuelles et actives**.\n\n' +
-        '**Invites actifs** (membres toujours présents) :\n' +
+        'Click a button below to claim your role based on your current active stats.\n\n' +
+        '**Active invites** (members still in the server):\n' +
         '• **5** → Bronze\n' +
         '• **10** → Silver\n' +
         '• **20** → Gold\n' +
         '• **33** → Premium\n\n' +
-        '**Boosts** :\n' +
-        '• Boost actif → Silver\n\n' +
-        '*Les rôles sont retirés automatiquement si tu n\'es plus éligible (invités partis ou boost retiré).*'
+        '**Server boosts**:\n' +
+        '• 1 confirmed active boost → Silver\n' +
+        '• 2+ confirmed active boosts → Gold (administrator confirmation required)\n\n' +
+        '*Roles are removed automatically when you are no longer eligible.*'
       )
       .setColor(0x5865F2)
-      .setFooter({ text: 'Gbauto • Claim tes rôles' })
+      .setFooter({ text: 'Gbauto • Claim your roles' })
       .setTimestamp();
 
     const row = new ActionRowBuilder().addComponents(
@@ -310,8 +313,8 @@ client.on(Events.MessageCreate, async (message) => {
     const embed = new EmbedBuilder()
       .setTitle(`Invites de ${target.user.username}`)
       .setDescription(
-        `**Invites actifs** : **${count}**\n` +
-        (roleName ? `Rôle éligible : **${roleName}**` : 'Aucun rôle invite pour le moment.')
+        `**Active invites**: **${count}**\n` +
+        (roleName ? `Eligible role: **${roleName}**` : 'No invite role earned yet.')
       )
       .setColor(0x57F287)
       .setThumbnail(target.user.displayAvatarURL());
@@ -321,20 +324,32 @@ client.on(Events.MessageCreate, async (message) => {
 
   // ---- !config ----
   if (cmd === 'config') {
-    if (!isAdmin) return message.reply('Admin uniquement.');
+    if (!isAdmin) return message.reply('Administrators only.');
 
     const lines = ['bronze', 'silver', 'gold', 'diamond', 'premium'].map(n => {
       const id = getRoleId(n);
       const role = message.guild.roles.cache.get(id);
-      return `**${n}** : ${role ? role.toString() : '`' + id + '` (introuvable)'}`;
+      return `**${n}**: ${role ? role.toString() : '`' + id + '` (not found)'}`;
     });
 
     const embed = new EmbedBuilder()
-      .setTitle('Configuration des rôles')
+      .setTitle('Role Configuration')
       .setDescription(lines.join('\n'))
       .setColor(0xFEE75C);
 
     return message.reply({ embeds: [embed] });
+  }
+
+  // ---- !boosts set @member <1|2> ----
+  if (cmd === 'boosts' && args[0]?.toLowerCase() === 'set') {
+    if (!isAdmin) return message.reply('Administrators only.');
+    const target = message.mentions.members.first();
+    const count = Number(args[2]);
+    if (!target || ![1, 2].includes(count)) return message.reply('Usage: `!boosts set @member 1` or `!boosts set @member 2`. Use 2 for two or more active boosts.');
+    if (!target.premiumSince) return message.reply('That member is not currently boosting this server.');
+    setConfig(`boost_count_${message.guild.id}_${target.id}`, count);
+    await syncMemberRoles(target);
+    return message.reply(`Confirmed ${count === 2 ? '2+ active boosts' : '1 active boost'} for ${target}. Their boost role is now **${count === 2 ? 'Gold' : 'Silver'}**.`);
   }
 
   // ---- !bronze|silver|gold|diamond|premium set <id> ----
@@ -348,10 +363,10 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     const role = message.guild.roles.cache.get(roleId);
-    if (!role) return message.reply('Rôle introuvable sur ce serveur.');
+    if (!role) return message.reply('Role not found on this server.');
 
     setConfig(`role_${cmd}`, roleId);
-    return message.reply(`Rôle **${cmd}** mis à jour → ${role}`);
+    return message.reply(`**${cmd}** role updated → ${role}`);
   }
 });
 
@@ -364,7 +379,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   const member = interaction.member;
   if (!member) {
-    return interaction.editReply('Impossible de récupérer ton profil membre.');
+    return interaction.editReply('Could not retrieve your server member profile.');
   }
 
   // Force un refresh du membre pour premiumSince a jour
@@ -376,29 +391,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const roleName = getInviteRoleForCount(result.inviteCount);
     if (roleName) {
       await interaction.editReply(
-        `Tu as **${result.inviteCount}** invites actifs.\n` +
-        `Rôle accordé / vérifié : **${roleName}**.\n` +
-        `Rôles actuellement éligibles : ${result.wantedRoles.join(', ') || 'aucun'}`
+        `You have **${result.inviteCount}** active invites.\n` +
+        `Eligible role granted / verified: **${roleName}**.\n` +
+        `Currently eligible roles: ${result.wantedRoles.join(', ') || 'none'}`
       );
     } else {
       await interaction.editReply(
         `Tu as **${result.inviteCount}** invites actifs.\n` +
-        `Il t'en faut au moins **5** pour Bronze.\n` +
-        `(Les invites comptent uniquement les membres encore présents sur le serveur)`
+        `You need at least **5** for Bronze.\n` +
+        `(Only invited members who are still in the server count.)`
       );
     }
   } else {
     // claim_boost
     if (result.isBoosting) {
       await interaction.editReply(
-        `Tu boostes actuellement ce serveur.\n` +
-        `Rôle **Silver** accordé / vérifié.\n\n` +
-        `*Note : Discord ne donne pas aux bots le nombre exact de boosts (1 vs 2+). Silver est donné dès qu'un boost est actif.*`
+        `You are currently boosting this server.\n` +
+        `Confirmed boost count: **${result.confirmedBoostCount >= 2 ? '2+' : '1'}**.\n` +
+        `Boost role granted / verified: **${result.confirmedBoostCount >= 2 ? 'Gold' : 'Silver'}**.\n\n` +
+        `*Discord does not expose each member's exact boost count to bots. An administrator can confirm 2+ boosts with \\`!boosts set @member 2\\`.*`
       );
     } else {
       await interaction.editReply(
-        `Tu ne boostes pas actuellement ce serveur.\n` +
-        `Boost le serveur pour obtenir le rôle **Silver**.`
+        `You are not currently boosting this server.\n` +
+        `Boost the server to earn **Silver** (or **Gold** with 2+ confirmed boosts).`
       );
     }
   }
@@ -407,7 +423,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // ==================== LOGIN ====================
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
-  console.error('DISCORD_TOKEN manquant dans les variables d\'environnement.');
+  console.error('DISCORD_TOKEN is missing from environment variables.');
   process.exit(1);
 }
 
