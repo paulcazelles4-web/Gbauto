@@ -254,7 +254,7 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   }
 });
 
-// ==================== COMMANDES TEXTE ====================
+// ==================== TEXT COMMANDS ====================
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guild) return;
   if (!message.content.startsWith('!')) return;
@@ -311,7 +311,7 @@ client.on(Events.MessageCreate, async (message) => {
     const roleName = getInviteRoleForCount(count);
 
     const embed = new EmbedBuilder()
-      .setTitle(`Invites de ${target.user.username}`)
+      .setTitle(`Invites for ${target.user.username}`)
       .setDescription(
         `**Active invites**: **${count}**\n` +
         (roleName ? `Eligible role: **${roleName}**` : 'No invite role earned yet.')
@@ -355,7 +355,7 @@ client.on(Events.MessageCreate, async (message) => {
   // ---- !bronze|silver|gold|diamond|premium set <id> ----
   const roleCmds = ['bronze', 'silver', 'gold', 'diamond', 'premium'];
   if (roleCmds.includes(cmd) && args[0]?.toLowerCase() === 'set') {
-    if (!isAdmin) return message.reply('Admin uniquement.');
+    if (!isAdmin) return message.reply('Administrators only.');
 
     const roleId = args[1];
     if (!roleId || !/^\d{17,20}$/.test(roleId)) {
@@ -370,7 +370,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// ==================== BOUTONS ====================
+// ==================== BUTTONS ====================
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton()) return;
   if (!['claim_invites', 'claim_boost'].includes(interaction.customId)) return;
@@ -382,7 +382,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.editReply('Could not retrieve your server member profile.');
   }
 
-  // Force un refresh du membre pour premiumSince a jour
+  // Refresh the member to get the latest premiumSince value
   const freshMember = await interaction.guild.members.fetch(member.id).catch(() => member);
 
   const result = await syncMemberRoles(freshMember);
@@ -397,7 +397,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       );
     } else {
       await interaction.editReply(
-        `Tu as **${result.inviteCount}** invites actifs.\n` +
+        `You have **${result.inviteCount}** active invites.\n` +
         `You need at least **5** for Bronze.\n` +
         `(Only invited members who are still in the server count.)`
       );
