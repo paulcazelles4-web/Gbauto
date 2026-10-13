@@ -329,7 +329,8 @@ client.on(Events.MessageCreate, async (message) => {
         '• **5** → Bronze\n' +
         '• **10** → Silver\n' +
         '• **20** → Gold\n' +
-        '• **33** → Premium\n\n' +
+        '• **33** → Diamond\n' +
+        '• **40** → Premium\n\n' +
         '**Server boosts**:\n' +
         '• 1 confirmed active boost → Silver\n' +
         '• 2+ confirmed active boosts → Gold (administrator confirmation required)\n\n' +
