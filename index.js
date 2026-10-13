@@ -265,44 +265,43 @@ client.on(Events.MessageCreate, async (message) => {
   const isStaff = getConfig(`staff_${message.guild.id}_${message.author.id}`, '0') === '1';
 
   if (cmd === 'help') {
-    if (!isAdmin && !isStaff) return message.reply('Members can use only `!invites`.');
+    if (!isAdmin && !isStaff) return message.reply('Members can only use `!invites`.');
 
     const embed = new EmbedBuilder()
-      .setTitle('Gbauto | Aide et commandes')
+      .setTitle('Gbauto | Help & Commands')
       .setDescription([
-        '**COMMANDES GÉNÉRALES**',
-        '• `!invites [@membre]` — voir les invitations actives',
+        '**GENERAL COMMANDS**',
+        '• `!invites [@member]` — view active invites',
         '',
         ...(isAdmin ? [
-          '**ADMINISTRATION**',
-          '• `!panel` — publier le panneau de récompenses',
-          '• `!config` — afficher la configuration des rôles',
-          '• `!boosts set @membre <1|2>` — confirmer les boosts',
+          '**ADMIN COMMANDS**',
+          '• `!panel` — publish the rewards panel',
+          '• `!config` — view configured reward roles',
+          '• `!boosts set @member <1|2>` — confirm active boosts',
           '',
-          '**RÔLES DE RÉCOMPENSE**',
+          '**REWARD ROLES**',
           '• `!bronze set <roleId>`',
           '• `!silver set <roleId>`',
           '• `!gold set <roleId>`',
           '• `!diamond set <roleId>`',
           '• `!premium set <roleId>`',
           '',
-          '**GESTION DU STAFF**',
-          '• `!staff @membre` — accorder l’accès staff',
-          '• `!staff remove @membre` — retirer l’accès staff'
+          '**STAFF MANAGEMENT**',
+          '• `!staff @member` — grant staff access',
+          '• `!staff remove @member` — revoke staff access'
         ] : [
-          '**ACCÈS STAFF**',
-          'Les commandes de gestion des demandes ne sont pas encore disponibles.'
+          '**STAFF ACCESS**',
+          'Staff request-management commands are not available yet.'
         ]),
         '',
-        '**RÉCOMPENSES**',
-        'Utilisez le panneau de récompenses pour réclamer votre rôle.'
-      ].join('\n'))
+        '**REWARDS**',
+        'Use the rewards panel to claim your role.'
+      ].join('\\n'))
       .setColor(0x5865F2)
-      .setFooter({ text: isAdmin ? 'Accès administrateur' : 'Accès staff' });
+      .setFooter({ text: isAdmin ? 'Administrator access' : 'Staff access' });
 
     return message.reply({ embeds: [embed] });
   }
-
   // Staff access can only be granted or revoked by administrators.
   if (cmd === 'staff') {
     if (!isAdmin) return message.reply('Administrators only.');
