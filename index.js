@@ -69,7 +69,7 @@ function getRoleId(name) {
 }
 
 // Invite thresholds
-const DEFAULT_INVITE_THRESHOLDS = { bronze: 5, silver: 10, gold: 20, diamond: 30, premium: 33 };
+const DEFAULT_INVITE_THRESHOLDS = { bronze: 5, silver: 10, gold: 20, diamond: 33, premium: 40 };
 for (const [name, count] of Object.entries(DEFAULT_INVITE_THRESHOLDS)) if (!getConfig(`invite_threshold_${name}`)) setConfig(`invite_threshold_${name}`, count);
 if (!getConfig('boost_threshold')) setConfig('boost_threshold', 2);
 function getInviteThresholds() {
