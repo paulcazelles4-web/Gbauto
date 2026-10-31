@@ -8,7 +8,8 @@ const {
   ButtonBuilder,
   ButtonStyle,
   PermissionFlagsBits,
-  Events
+  Events,
+  ChannelType
 } = require('discord.js');
 const Database = require('better-sqlite3');
 const fs = require('fs');
@@ -52,7 +53,11 @@ function setConfig(key, value) {
   ).run(key, String(value));
 }
 
-// Default role IDs (overridable with !bronze set, etc.)
+function deleteConfig(key) {
+  db.prepare('DELETE FROM config WHERE key = ?').run(key);
+}
+
+// Default role IDs
 const DEFAULT_ROLES = {
   bronze: process.env.ROLE_BRONZE || '1487902274435944531',
   silver: process.env.ROLE_SILVER || '1487902274435944532',
@@ -65,17 +70,80 @@ for (const [k, v] of Object.entries(DEFAULT_ROLES)) {
   if (!getConfig(`role_${k}`)) setConfig(`role_${k}`, v);
 }
 
+// Default invite thresholds
+const DEFAULT_THRESHOLDS = {
+  bronze: 5,
+  silver: 10,
+  gold: 20,
+  diamond: 0,
+  premium: 33
+};
+
+for (const [k, v] of Object.entries(DEFAULT_THRESHOLDS)) {
+  if (!getConfig(`threshold_${k}`)) setConfig(`threshold_${k}`, v);
+}
+
+// Role rank (higher = better). Only the highest eligible role is kept.
+const ROLE_RANK = {
+  bronze: 1,
+  silver: 2,
+  gold: 3,
+  diamond: 4,
+  premium: 5
+};
+
+const ROLE_NAMES = ['bronze', 'silver', 'gold', 'diamond', 'premium'];
+
 function getRoleId(name) {
   return getConfig(`role_${name}`, DEFAULT_ROLES[name]);
 }
 
-// Invite thresholds: highest first
-const INVITE_THRESHOLDS = [
-  { count: 33, role: 'premium' },
-  { count: 20, role: 'gold' },
-  { count: 10, role: 'silver' },
-  { count: 5, role: 'bronze' }
-];
+function getThreshold(name) {
+  return Number(getConfig(`threshold_${name}`, DEFAULT_THRESHOLDS[name] ?? 0));
+}
+
+function getInviteThresholdsSorted() {
+  return ROLE_NAMES
+    .map((role) => ({ role, count: getThreshold(role) }))
+    .filter((t) => t.count > 0)
+    .sort((a, b) => b.count - a.count);
+}
+
+function getInviteRoleForCount(count) {
+  for (const t of getInviteThresholdsSorted()) {
+    if (count >= t.count) return t.role;
+  }
+  return null;
+}
+
+function getBoostRole(guildId, userId, isBoosting) {
+  if (!isBoosting) return null;
+  const confirmed = Number(getConfig(`boost_confirmed_${guildId}_${userId}`, '0'));
+  // 2+ boosts confirmed by staff -> gold, else 1 boost -> silver
+  return confirmed >= 2 ? 'gold' : 'silver';
+}
+
+function pickHighestRole(...roleNames) {
+  let best = null;
+  let bestRank = 0;
+  for (const name of roleNames) {
+    if (!name) continue;
+    const rank = ROLE_RANK[name] || 0;
+    if (rank > bestRank) {
+      bestRank = rank;
+      best = name;
+    }
+  }
+  return best;
+}
+
+function formatThresholdsText() {
+  const lines = [];
+  for (const t of getInviteThresholdsSorted().slice().reverse()) {
+    lines.push(`• **${t.count}** → ${t.role.charAt(0).toUpperCase() + t.role.slice(1)}`);
+  }
+  return lines.join('\n') || 'No invite thresholds configured.';
+}
 
 // ==================== CLIENT ====================
 const client = new Client({
@@ -89,8 +157,26 @@ const client = new Client({
   partials: [Partials.GuildMember]
 });
 
-// In-memory invite cache (used to detect who invited whom)
-const inviteCache = new Map(); // guildId -> Map<code, {uses, inviterId}>
+const inviteCache = new Map();
+
+// ==================== LOGS ====================
+async function sendLog(guild, content, color = 0x5865F2) {
+  const channelId = getConfig(`log_channel_${guild.id}`);
+  if (!channelId) return;
+  const channel = guild.channels.cache.get(channelId);
+  if (!channel || !channel.isTextBased()) return;
+
+  const embed = new EmbedBuilder()
+    .setDescription(content)
+    .setColor(color)
+    .setTimestamp();
+
+  try {
+    await channel.send({ embeds: [embed] });
+  } catch (e) {
+    console.error('[Log]', e.message);
+  }
+}
 
 // ==================== HELPERS ====================
 async function cacheGuildInvites(guild) {
@@ -119,65 +205,91 @@ function getActiveInviteCount(guildId, userId) {
   return row?.count || 0;
 }
 
-function getInviteRoleForCount(count) {
-  for (const t of INVITE_THRESHOLDS) {
-    if (count >= t.count) return t.role;
-  }
-  return null;
+function getLeaderboard(guildId, limit = 10) {
+  return db.prepare(`
+    SELECT inviter_id, COUNT(*) as count
+    FROM invites
+    WHERE guild_id = ?
+    GROUP BY inviter_id
+    ORDER BY count DESC
+    LIMIT ?
+  `).all(guildId, limit);
 }
 
 /**
- * Sync invite + boost roles for a member.
- * Boost rule: active boost always grants Silver only.
- * Gold for 2 boosts is handled manually via ticket (staff).
+ * Sync roles: only ONE role — the highest from invites OR boosts.
  */
-async function syncMemberRoles(member) {
-  if (!member || member.user.bot) return;
+async function syncMemberRoles(member, reason = 'sync') {
+  if (!member || member.user.bot) return null;
 
   const guild = member.guild;
   const inviteCount = getActiveInviteCount(guild.id, member.id);
   const isBoosting = !!member.premiumSince;
 
-  const wantedRoles = new Set();
+  const inviteRole = getInviteRoleForCount(inviteCount);
+  const boostRole = getBoostRole(guild.id, member.id, isBoosting);
+  const highest = pickHighestRole(inviteRole, boostRole);
 
-  // Invite-based roles (highest threshold wins)
-  const inviteRoleName = getInviteRoleForCount(inviteCount);
-  if (inviteRoleName) wantedRoles.add(inviteRoleName);
-
-  // Boost: 1 active boost -> Silver only (2 boosts = open a ticket)
-  if (isBoosting) wantedRoles.add('silver');
-
-  const allManaged = ['bronze', 'silver', 'gold', 'diamond', 'premium'];
   const rolesToAdd = [];
   const rolesToRemove = [];
+  let previousRole = null;
 
-  for (const name of allManaged) {
+  for (const name of ROLE_NAMES) {
     const roleId = getRoleId(name);
     if (!roleId) continue;
     const role = guild.roles.cache.get(roleId);
     if (!role) continue;
 
     const has = member.roles.cache.has(roleId);
-    const shouldHave = wantedRoles.has(name);
+    if (has) previousRole = name;
 
+    const shouldHave = highest === name;
     if (shouldHave && !has) rolesToAdd.push(role);
     if (!shouldHave && has) rolesToRemove.push(role);
   }
 
   try {
-    if (rolesToAdd.length) await member.roles.add(rolesToAdd, 'Gbauto: eligible');
-    if (rolesToRemove.length) await member.roles.remove(rolesToRemove, 'Gbauto: no longer eligible');
+    if (rolesToAdd.length) await member.roles.add(rolesToAdd, `Gbauto: ${reason}`);
+    if (rolesToRemove.length) await member.roles.remove(rolesToRemove, `Gbauto: ${reason}`);
   } catch (e) {
     console.error(`[Roles] Sync failed for ${member.user.tag}:`, e.message);
   }
 
-  return { inviteCount, isBoosting, wantedRoles: [...wantedRoles] };
+  if (highest !== previousRole) {
+    if (highest && !previousRole) {
+      await sendLog(
+        guild,
+        `✅ **Role granted** to <@${member.id}> → **${highest}**\nInvites: ${inviteCount} | Boosting: ${isBoosting ? 'yes' : 'no'}\nReason: ${reason}`,
+        0x57F287
+      );
+    } else if (!highest && previousRole) {
+      await sendLog(
+        guild,
+        `❌ **Role removed** from <@${member.id}> (was **${previousRole}**)\nInvites: ${inviteCount} | Boosting: ${isBoosting ? 'yes' : 'no'}\nReason: ${reason}`,
+        0xED4245
+      );
+    } else if (highest && previousRole && highest !== previousRole) {
+      await sendLog(
+        guild,
+        `🔄 **Role updated** for <@${member.id}>: **${previousRole}** → **${highest}**\nInvites: ${inviteCount} | Boosting: ${isBoosting ? 'yes' : 'no'}\nReason: ${reason}`,
+        0xFEE75C
+      );
+    }
+  }
+
+  return {
+    inviteCount,
+    isBoosting,
+    inviteRole,
+    boostRole,
+    highest,
+    previousRole
+  };
 }
 
 // ==================== EVENTS ====================
 client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
-
   for (const guild of client.guilds.cache.values()) {
     await cacheGuildInvites(guild);
     console.log(`Invite cache loaded for ${guild.name}`);
@@ -221,8 +333,20 @@ client.on(Events.GuildMemberAdd, async (member) => {
         VALUES (?, ?, ?, ?)
       `).run(guild.id, inviterId, member.id, Date.now());
 
+      await sendLog(
+        guild,
+        `📥 **Member joined** <@${member.id}>\nInvited by: <@${inviterId}>`,
+        0x57F287
+      );
+
       const inviterMember = await guild.members.fetch(inviterId).catch(() => null);
-      if (inviterMember) await syncMemberRoles(inviterMember);
+      if (inviterMember) await syncMemberRoles(inviterMember, 'invite gained');
+    } else {
+      await sendLog(
+        guild,
+        `📥 **Member joined** <@${member.id}>\nInviter: unknown (vanity / direct)`,
+        0x99AAB5
+      );
     }
   } catch (e) {
     console.error('[GuildMemberAdd]', e.message);
@@ -240,9 +364,18 @@ client.on(Events.GuildMemberRemove, async (member) => {
     db.prepare('DELETE FROM invites WHERE guild_id = ? AND invited_id = ?')
       .run(guild.id, member.id);
 
+    await sendLog(
+      guild,
+      `📤 **Member left** <@${member.id}>\nWas invited by: <@${row.inviter_id}> (invite credit removed)`,
+      0xED4245
+    );
+
     const inviterMember = await guild.members.fetch(row.inviter_id).catch(() => null);
-    if (inviterMember) await syncMemberRoles(inviterMember);
+    if (inviterMember) await syncMemberRoles(inviterMember, 'invite lost');
   }
+
+  // Clear boost confirmation if they leave
+  deleteConfig(`boost_confirmed_${guild.id}_${member.id}`);
 });
 
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
@@ -250,7 +383,21 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   const isBoosting = !!newMember.premiumSince;
 
   if (wasBoosting !== isBoosting) {
-    await syncMemberRoles(newMember);
+    if (!isBoosting) {
+      deleteConfig(`boost_confirmed_${newMember.guild.id}_${newMember.id}`);
+      await sendLog(
+        newMember.guild,
+        `⭐ **Boost ended** for <@${newMember.id}>`,
+        0xED4245
+      );
+    } else {
+      await sendLog(
+        newMember.guild,
+        `⭐ **Boost started** for <@${newMember.id}>`,
+        0x57F287
+      );
+    }
+    await syncMemberRoles(newMember, isBoosting ? 'boost started' : 'boost ended');
   }
 });
 
@@ -261,7 +408,6 @@ client.on(Events.MessageCreate, async (message) => {
 
   const args = message.content.slice(1).trim().split(/\s+/);
   const cmd = args.shift()?.toLowerCase();
-
   const isAdmin = message.member.permissions.has(PermissionFlagsBits.Administrator);
 
   // ---- !help ----
@@ -269,6 +415,7 @@ client.on(Events.MessageCreate, async (message) => {
     const lines = [
       '**Member commands**',
       '• `!invites [@member]` — view active invite count',
+      '• `!leaderboard` / `!top` — top inviters',
       '',
       '**Rewards**',
       'Use the panel buttons to claim your roles.'
@@ -279,21 +426,25 @@ client.on(Events.MessageCreate, async (message) => {
         '',
         '**Admin commands**',
         '• `!panel` — post the rewards panel',
-        '• `!config` — view configured reward roles',
-        '• `!bronze set <roleId>`',
-        '• `!silver set <roleId>`',
-        '• `!gold set <roleId>`',
-        '• `!diamond set <roleId>`',
-        '• `!premium set <roleId>`'
+        '• `!config` — view role IDs & thresholds',
+        '• `!log set #channel` — set log channel',
+        '• `!log off` — disable logs',
+        '• `!boost confirm @member` — confirm 2 boosts → Gold',
+        '• `!boost revoke @member` — remove 2-boost confirmation',
+        '• `!threshold` — list invite thresholds',
+        '• `!threshold set <role> <number>` — set threshold (0 = disabled)',
+        '• `!bronze set <roleId>` (also silver/gold/diamond/premium)'
       );
     }
 
-    const embed = new EmbedBuilder()
-      .setTitle('Gbauto | Help')
-      .setDescription(lines.join('\n'))
-      .setColor(0x5865F2);
-
-    return message.reply({ embeds: [embed] });
+    return message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Gbauto | Help')
+          .setDescription(lines.join('\n'))
+          .setColor(0x5865F2)
+      ]
+    });
   }
 
   // ---- !panel ----
@@ -305,15 +456,12 @@ client.on(Events.MessageCreate, async (message) => {
       .setDescription(
         'Click a button below to **claim** your role based on your **current active** stats.\n\n' +
         '**Active invites** (members still in the server):\n' +
-        '• **5** → Bronze\n' +
-        '• **10** → Silver\n' +
-        '• **20** → Gold\n' +
-        '• **33** → Premium\n\n' +
-        '**Server boosts**:\n' +
+        formatThresholdsText() +
+        '\n\n**Server boosts**:\n' +
         '• **1 boost** → Silver (claim with the button)\n' +
-        '• **2 boosts** → Open a ticket for staff verification\n\n' +
-        '*Roles are removed automatically when you are no longer eligible\n' +
-        '(invited members left or boost removed).*'
+        '• **2 boosts** → Open a ticket — staff uses `!boost confirm`\n\n' +
+        '*Only your **highest** role is kept (roles do not stack).*\n' +
+        '*Roles are removed automatically when you are no longer eligible.*'
       )
       .setColor(0x5865F2)
       .setFooter({ text: 'Gbauto • Claim your roles' })
@@ -337,45 +485,215 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  // ---- !invites [@user] ----
+  // ---- !invites ----
   if (cmd === 'invites') {
     const target = message.mentions.members.first() || message.member;
     const count = getActiveInviteCount(message.guild.id, target.id);
     const roleName = getInviteRoleForCount(count);
+    const next = getInviteThresholdsSorted()
+      .slice()
+      .reverse()
+      .find((t) => count < t.count);
 
-    const embed = new EmbedBuilder()
-      .setTitle(`Invites for ${target.user.username}`)
-      .setDescription(
-        `**Active invites**: **${count}**\n` +
-        (roleName ? `Eligible role: **${roleName}**` : 'No invite role earned yet.')
-      )
-      .setColor(0x57F287)
-      .setThumbnail(target.user.displayAvatarURL());
+    let desc = `**Active invites**: **${count}**\n`;
+    desc += roleName
+      ? `Eligible invite role: **${roleName}**\n`
+      : 'No invite role earned yet.\n';
+    if (next) desc += `Next: **${next.count - count}** more for **${next.role}**.`;
 
-    return message.reply({ embeds: [embed] });
+    return message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle(`Invites for ${target.user.username}`)
+          .setDescription(desc)
+          .setColor(0x57F287)
+          .setThumbnail(target.user.displayAvatarURL())
+      ]
+    });
+  }
+
+  // ---- !leaderboard / !top ----
+  if (cmd === 'leaderboard' || cmd === 'top') {
+    const rows = getLeaderboard(message.guild.id, 10);
+    if (!rows.length) {
+      return message.reply('No invite data yet.');
+    }
+
+    const medals = ['🥇', '🥈', '🥉'];
+    const lines = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const prefix = medals[i] || `**${i + 1}.**`;
+      lines.push(`${prefix} <@${r.inviter_id}> — **${r.count}** invite${r.count === 1 ? '' : 's'}`);
+    }
+
+    return message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('🏆 Invite Leaderboard')
+          .setDescription(lines.join('\n'))
+          .setColor(0xFEE75C)
+          .setFooter({ text: 'Active invites only (members still in the server)' })
+          .setTimestamp()
+      ]
+    });
   }
 
   // ---- !config ----
   if (cmd === 'config') {
     if (!isAdmin) return message.reply('Administrators only.');
 
-    const lines = ['bronze', 'silver', 'gold', 'diamond', 'premium'].map((n) => {
+    const roleLines = ROLE_NAMES.map((n) => {
       const id = getRoleId(n);
       const role = message.guild.roles.cache.get(id);
       return `**${n}**: ${role ? role.toString() : '`' + id + '` (not found)'}`;
     });
 
-    const embed = new EmbedBuilder()
-      .setTitle('Role Configuration')
-      .setDescription(lines.join('\n'))
-      .setColor(0xFEE75C);
+    const logId = getConfig(`log_channel_${message.guild.id}`);
+    const logLine = logId
+      ? `**Log channel**: <#${logId}>`
+      : '**Log channel**: not set (`!log set #channel`)';
 
-    return message.reply({ embeds: [embed] });
+    return message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Configuration')
+          .setDescription(
+            '**Roles**\n' + roleLines.join('\n') +
+            '\n\n**Invite thresholds**\n' + formatThresholdsText() +
+            '\n\n' + logLine
+          )
+          .setColor(0xFEE75C)
+      ]
+    });
+  }
+
+  // ---- !log set #channel / !log off ----
+  if (cmd === 'log') {
+    if (!isAdmin) return message.reply('Administrators only.');
+
+    const sub = args[0]?.toLowerCase();
+    if (sub === 'off' || sub === 'disable') {
+      deleteConfig(`log_channel_${message.guild.id}`);
+      return message.reply('Logs disabled.');
+    }
+
+    if (sub === 'set') {
+      const channel =
+        message.mentions.channels.first() ||
+        message.guild.channels.cache.get(args[1]);
+
+      if (!channel || channel.type !== ChannelType.GuildText) {
+        return message.reply('Usage: `!log set #channel`');
+      }
+
+      setConfig(`log_channel_${message.guild.id}`, channel.id);
+      await sendLog(
+        message.guild,
+        `📋 Log channel set to ${channel} by <@${message.author.id}>`,
+        0x5865F2
+      );
+      return message.reply(`Log channel set to ${channel}.`);
+    }
+
+    const current = getConfig(`log_channel_${message.guild.id}`);
+    return message.reply(
+      current
+        ? `Current log channel: <#${current}>\nUse \`!log set #channel\` or \`!log off\`.`
+        : 'No log channel set. Use `!log set #channel`.'
+    );
+  }
+
+  // ---- !boost confirm @member / !boost revoke @member ----
+  if (cmd === 'boost') {
+    if (!isAdmin) return message.reply('Administrators only.');
+
+    const sub = args[0]?.toLowerCase();
+    const target = message.mentions.members.first();
+
+    if (!target) {
+      return message.reply(
+        'Usage:\n`!boost confirm @member` — confirm 2 boosts (Gold)\n`!boost revoke @member` — remove confirmation'
+      );
+    }
+
+    if (sub === 'confirm') {
+      if (!target.premiumSince) {
+        return message.reply(`${target} is not currently boosting this server.`);
+      }
+      setConfig(`boost_confirmed_${message.guild.id}_${target.id}`, '2');
+      const result = await syncMemberRoles(target, 'boost confirm (2+)');
+      await sendLog(
+        message.guild,
+        `⭐ **2 boosts confirmed** for <@${target.id}> by <@${message.author.id}>\nRole: **${result?.highest || 'none'}**`,
+        0x57F287
+      );
+      return message.reply(
+        `Confirmed **2+ boosts** for ${target}. Role: **${result?.highest || 'none'}**.`
+      );
+    }
+
+    if (sub === 'revoke') {
+      deleteConfig(`boost_confirmed_${message.guild.id}_${target.id}`);
+      const result = await syncMemberRoles(target, 'boost confirm revoked');
+      await sendLog(
+        message.guild,
+        `⭐ **Boost confirmation revoked** for <@${target.id}> by <@${message.author.id}>\nRole: **${result?.highest || 'none'}**`,
+        0xFEE75C
+      );
+      return message.reply(
+        `Boost confirmation removed for ${target}. Role: **${result?.highest || 'none'}**.`
+      );
+    }
+
+    return message.reply(
+      'Usage:\n`!boost confirm @member`\n`!boost revoke @member`'
+    );
+  }
+
+  // ---- !threshold / !threshold set <role> <number> ----
+  if (cmd === 'threshold' || cmd === 'thresholds') {
+    if (!isAdmin) return message.reply('Administrators only.');
+
+    const sub = args[0]?.toLowerCase();
+
+    if (!sub || sub === 'list') {
+      return message.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('Invite Thresholds')
+            .setDescription(
+              formatThresholdsText() +
+              '\n\nUsage: `!threshold set <bronze|silver|gold|diamond|premium> <number>`\nUse `0` to disable a tier.'
+            )
+            .setColor(0x5865F2)
+        ]
+      });
+    }
+
+    if (sub === 'set') {
+      const roleName = args[1]?.toLowerCase();
+      const count = Number(args[2]);
+
+      if (!ROLE_NAMES.includes(roleName) || Number.isNaN(count) || count < 0) {
+        return message.reply(
+          'Usage: `!threshold set <bronze|silver|gold|diamond|premium> <number>`'
+        );
+      }
+
+      setConfig(`threshold_${roleName}`, Math.floor(count));
+      return message.reply(
+        count === 0
+          ? `Threshold for **${roleName}** disabled.`
+          : `Threshold for **${roleName}** set to **${Math.floor(count)}** invites.`
+      );
+    }
+
+    return message.reply('Usage: `!threshold` or `!threshold set <role> <number>`');
   }
 
   // ---- !bronze|silver|gold|diamond|premium set <id> ----
-  const roleCmds = ['bronze', 'silver', 'gold', 'diamond', 'premium'];
-  if (roleCmds.includes(cmd) && args[0]?.toLowerCase() === 'set') {
+  if (ROLE_NAMES.includes(cmd) && args[0]?.toLowerCase() === 'set') {
     if (!isAdmin) return message.reply('Administrators only.');
 
     const roleId = args[1];
@@ -404,37 +722,65 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   const freshMember = await interaction.guild.members.fetch(member.id).catch(() => member);
-  const result = await syncMemberRoles(freshMember);
+  const result = await syncMemberRoles(
+    freshMember,
+    interaction.customId === 'claim_invites' ? 'claim invites' : 'claim boost'
+  );
+
+  if (!result) {
+    return interaction.editReply('Could not sync your roles.');
+  }
 
   if (interaction.customId === 'claim_invites') {
-    const roleName = getInviteRoleForCount(result.inviteCount);
-    if (roleName) {
-      await interaction.editReply(
+    const next = getInviteThresholdsSorted()
+      .slice()
+      .reverse()
+      .find((t) => result.inviteCount < t.count);
+
+    if (result.highest) {
+      let msg =
         `You have **${result.inviteCount}** active invites.\n` +
-          `Role granted / verified: **${roleName}**.\n` +
-          `Currently eligible roles: ${result.wantedRoles.join(', ') || 'none'}`
-      );
+        `Your role: **${result.highest}**` +
+        (result.inviteRole && result.boostRole && result.inviteRole !== result.boostRole
+          ? ` (best of invites: **${result.inviteRole}**, boost: **${result.boostRole}**)`
+          : '') +
+        '.';
+      if (next) msg += `\n**${next.count - result.inviteCount}** more invites for **${next.role}**.`;
+      await interaction.editReply(msg);
     } else {
+      const min = getInviteThresholdsSorted().slice().reverse()[0];
       await interaction.editReply(
         `You have **${result.inviteCount}** active invites.\n` +
-          `You need at least **5** for Bronze.\n` +
+          (min
+            ? `You need at least **${min.count}** for **${min.role}**.\n`
+            : '') +
           `(Only invited members who are still in the server count.)`
       );
     }
   } else {
     // claim_boost
     if (result.isBoosting) {
-      await interaction.editReply(
-        `You are currently boosting this server.\n` +
-          `**Silver** role granted / verified.\n\n` +
-          `If you have **2 boosts**, please **open a ticket** so staff can verify and grant the appropriate reward.\n\n` +
-          `*Discord does not let bots see how many boosts each member has applied (1 vs 2+). Only active boosting is detected automatically.*`
+      const confirmed = Number(
+        getConfig(`boost_confirmed_${interaction.guild.id}_${freshMember.id}`, '0')
       );
+      if (confirmed >= 2) {
+        await interaction.editReply(
+          `You are boosting this server (**2+ boosts confirmed**).\n` +
+            `Your role: **${result.highest || 'none'}**.`
+        );
+      } else {
+        await interaction.editReply(
+          `You are currently boosting this server.\n` +
+            `Your role: **${result.highest || 'silver'}**.\n\n` +
+            `If you have **2 boosts**, please **open a ticket**.\n` +
+            `Staff can confirm with \`!boost confirm @you\`.`
+        );
+      }
     } else {
       await interaction.editReply(
         `You are not currently boosting this server.\n` +
-          `Boost the server once to claim **Silver**.\n` +
-          `If you plan to apply **2 boosts**, open a ticket after boosting for staff verification.`
+          `Boost once to claim **Silver**.\n` +
+          `For **2 boosts**, open a ticket after boosting for staff verification.`
       );
     }
   }
