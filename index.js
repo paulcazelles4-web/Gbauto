@@ -47,11 +47,12 @@ function getConfig(key, fallback = null) {
 }
 
 function setConfig(key, value) {
-  db.prepare('INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(key, String(value));
+  db.prepare(
+    'INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  ).run(key, String(value));
 }
 
-// Default role IDs
+// Default role IDs (overridable with !bronze set, etc.)
 const DEFAULT_ROLES = {
   bronze: process.env.ROLE_BRONZE || '1487902274435944531',
   silver: process.env.ROLE_SILVER || '1487902274435944532',
@@ -68,13 +69,13 @@ function getRoleId(name) {
   return getConfig(`role_${name}`, DEFAULT_ROLES[name]);
 }
 
-// Invite thresholds
-const DEFAULT_INVITE_THRESHOLDS = { bronze: 5, silver: 10, gold: 20, diamond: 33, premium: 40 };
-for (const [name, count] of Object.entries(DEFAULT_INVITE_THRESHOLDS)) if (!getConfig(`invite_threshold_${name}`)) setConfig(`invite_threshold_${name}`, count);
-if (!getConfig('boost_threshold')) setConfig('boost_threshold', 2);
-function getInviteThresholds() {
-  return Object.keys(DEFAULT_INVITE_THRESHOLDS).map(role => ({ role, count: Number(getConfig(`invite_threshold_${role}`, DEFAULT_INVITE_THRESHOLDS[role])) })).filter(x => x.count > 0).sort((a,b) => b.count-a.count);
-}
+// Invite thresholds: highest first
+const INVITE_THRESHOLDS = [
+  { count: 33, role: 'premium' },
+  { count: 20, role: 'gold' },
+  { count: 10, role: 'silver' },
+  { count: 5, role: 'bronze' }
+];
 
 // ==================== CLIENT ====================
 const client = new Client({
@@ -88,7 +89,7 @@ const client = new Client({
   partials: [Partials.GuildMember]
 });
 
-// In-memory invite cache (used to detect inviters)
+// In-memory invite cache (used to detect who invited whom)
 const inviteCache = new Map(); // guildId -> Map<code, {uses, inviterId}>
 
 // ==================== HELPERS ====================
@@ -119,10 +120,17 @@ function getActiveInviteCount(guildId, userId) {
 }
 
 function getInviteRoleForCount(count) {
-  for (const t of getInviteThresholds()) if (count >= t.count) return t.role;
+  for (const t of INVITE_THRESHOLDS) {
+    if (count >= t.count) return t.role;
+  }
   return null;
 }
 
+/**
+ * Sync invite + boost roles for a member.
+ * Boost rule: active boost always grants Silver only.
+ * Gold for 2 boosts is handled manually via ticket (staff).
+ */
 async function syncMemberRoles(member) {
   if (!member || member.user.bot) return;
 
@@ -132,14 +140,12 @@ async function syncMemberRoles(member) {
 
   const wantedRoles = new Set();
 
-  // Invite-based roles
+  // Invite-based roles (highest threshold wins)
   const inviteRoleName = getInviteRoleForCount(inviteCount);
   if (inviteRoleName) wantedRoles.add(inviteRoleName);
 
-  // Boost roles: Discord does not expose individual boost counts, so admins confirm 2+.
-  const confirmedBoostCount = Number(getConfig(`boost_count_${guild.id}_${member.id}`, '1'));
-  const requiredBoostCount = Number(getConfig('boost_threshold', '2'));
-  if (isBoosting) wantedRoles.add(confirmedBoostCount >= requiredBoostCount ? 'gold' : 'silver');
+  // Boost: 1 active boost -> Silver only (2 boosts = open a ticket)
+  if (isBoosting) wantedRoles.add('silver');
 
   const allManaged = ['bronze', 'silver', 'gold', 'diamond', 'premium'];
   const rolesToAdd = [];
@@ -165,7 +171,7 @@ async function syncMemberRoles(member) {
     console.error(`[Roles] Sync failed for ${member.user.tag}:`, e.message);
   }
 
-  return { inviteCount, isBoosting, confirmedBoostCount, wantedRoles: [...wantedRoles] };
+  return { inviteCount, isBoosting, wantedRoles: [...wantedRoles] };
 }
 
 // ==================== EVENTS ====================
@@ -207,7 +213,6 @@ client.on(Events.GuildMemberAdd, async (member) => {
       }
     }
 
-    // Update the cache
     await cacheGuildInvites(guild);
 
     if (inviterId) {
@@ -216,7 +221,6 @@ client.on(Events.GuildMemberAdd, async (member) => {
         VALUES (?, ?, ?, ?)
       `).run(guild.id, inviterId, member.id, Date.now());
 
-      // Sync the inviter's roles
       const inviterMember = await guild.members.fetch(inviterId).catch(() => null);
       if (inviterMember) await syncMemberRoles(inviterMember);
     }
@@ -228,27 +232,24 @@ client.on(Events.GuildMemberAdd, async (member) => {
 client.on(Events.GuildMemberRemove, async (member) => {
   const guild = member.guild;
 
-  // Remove this member's invite record, if they were invited by someone
-  const row = db.prepare('SELECT inviter_id FROM invites WHERE guild_id = ? AND invited_id = ?')
-    .get(guild.id, member.id);
+  const row = db.prepare(
+    'SELECT inviter_id FROM invites WHERE guild_id = ? AND invited_id = ?'
+  ).get(guild.id, member.id);
 
   if (row) {
     db.prepare('DELETE FROM invites WHERE guild_id = ? AND invited_id = ?')
       .run(guild.id, member.id);
 
-    // Recalculate the inviter's roles
     const inviterMember = await guild.members.fetch(row.inviter_id).catch(() => null);
     if (inviterMember) await syncMemberRoles(inviterMember);
   }
 });
 
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
-  // Detect boost started / stopped
   const wasBoosting = !!oldMember.premiumSince;
   const isBoosting = !!newMember.premiumSince;
 
   if (wasBoosting !== isBoosting) {
-    if (!isBoosting) db.prepare('DELETE FROM config WHERE key = ?').run(`boost_count_${newMember.guild.id}_${newMember.id}`);
     await syncMemberRoles(newMember);
   }
 });
@@ -262,59 +263,37 @@ client.on(Events.MessageCreate, async (message) => {
   const cmd = args.shift()?.toLowerCase();
 
   const isAdmin = message.member.permissions.has(PermissionFlagsBits.Administrator);
-  const isStaff = getConfig(`staff_${message.guild.id}_${message.author.id}`, '0') === '1';
 
+  // ---- !help ----
   if (cmd === 'help') {
-    if (!isAdmin && !isStaff) return message.reply('Members can only use `!invites`.');
+    const lines = [
+      '**Member commands**',
+      '• `!invites [@member]` — view active invite count',
+      '',
+      '**Rewards**',
+      'Use the panel buttons to claim your roles.'
+    ];
+
+    if (isAdmin) {
+      lines.push(
+        '',
+        '**Admin commands**',
+        '• `!panel` — post the rewards panel',
+        '• `!config` — view configured reward roles',
+        '• `!bronze set <roleId>`',
+        '• `!silver set <roleId>`',
+        '• `!gold set <roleId>`',
+        '• `!diamond set <roleId>`',
+        '• `!premium set <roleId>`'
+      );
+    }
 
     const embed = new EmbedBuilder()
-      .setTitle('Gbauto | Help & Commands')
-      .setDescription([
-        '**GENERAL COMMANDS**',
-        '• `!invites [@member]` — view active invites',
-        '',
-        ...(isAdmin ? [
-          '**ADMIN COMMANDS**',
-          '• `!panel` — publish the rewards panel',
-          '• `!config` — view configured reward roles',
-          '• `!boosts set @member <1|2>` — confirm active boosts',
-          '',
-          '**REWARD ROLES**',
-          '• `!bronze set <roleId>`',
-          '• `!silver set <roleId>`',
-          '• `!gold set <roleId>`',
-          '• `!diamond set <roleId>`',
-          '• `!premium set <roleId>`',
-          '',
-          '**STAFF MANAGEMENT**',
-          '• `!staff @member` — grant staff access',
-          '• `!staff remove @member` — revoke staff access'
-        ] : [
-          '**STAFF ACCESS**',
-          'Staff request-management commands are not available yet.'
-        ]),
-        '',
-        '**REWARDS**',
-        'Use the rewards panel to claim your role.'
-      ].join('\n'))
-      .setColor(0x5865F2)
-      .setFooter({ text: isAdmin ? 'Administrator access' : 'Staff access' });
+      .setTitle('Gbauto | Help')
+      .setDescription(lines.join('\n'))
+      .setColor(0x5865F2);
 
     return message.reply({ embeds: [embed] });
-  }
-  // Staff access can only be granted or revoked by administrators.
-  if (cmd === 'staff') {
-    if (!isAdmin) return message.reply('Administrators only.');
-    const target = message.mentions.members.first();
-    const action = args[0]?.toLowerCase();
-    if (!target) return message.reply('Usage: `!staff @member` or `!staff remove @member`.');
-    if (target.id === message.author.id) return message.reply('You cannot change your own staff access.');
-    if (action === 'remove') {
-      db.prepare('DELETE FROM config WHERE key = ?').run(`staff_${message.guild.id}_${target.id}`);
-      return message.reply(`Staff access removed for ${target}.`);
-    }
-    setConfig(`staff_${message.guild.id}_${target.id}`, '1');
-    return message.reply(`Staff access granted to ${target}. Staff-specific request commands are not implemented yet.`);
   }
 
   // ---- !panel ----
@@ -324,17 +303,17 @@ client.on(Events.MessageCreate, async (message) => {
     const embed = new EmbedBuilder()
       .setTitle('Invite & Boost Rewards')
       .setDescription(
-        'Click a button below to claim your role based on your current active stats.\n\n' +
+        'Click a button below to **claim** your role based on your **current active** stats.\n\n' +
         '**Active invites** (members still in the server):\n' +
         '• **5** → Bronze\n' +
         '• **10** → Silver\n' +
         '• **20** → Gold\n' +
-        '• **33** → Diamond\n' +
-        '• **40** → Premium\n\n' +
+        '• **33** → Premium\n\n' +
         '**Server boosts**:\n' +
-        '• 1 confirmed active boost → Silver\n' +
-        '• 2+ confirmed active boosts → Gold (administrator confirmation required)\n\n' +
-        '*Roles are removed automatically when you are no longer eligible.*'
+        '• **1 boost** → Silver (claim with the button)\n' +
+        '• **2 boosts** → Open a ticket for staff verification\n\n' +
+        '*Roles are removed automatically when you are no longer eligible\n' +
+        '(invited members left or boost removed).*'
       )
       .setColor(0x5865F2)
       .setFooter({ text: 'Gbauto • Claim your roles' })
@@ -380,28 +359,18 @@ client.on(Events.MessageCreate, async (message) => {
   if (cmd === 'config') {
     if (!isAdmin) return message.reply('Administrators only.');
 
-    const keys = ['bronze', 'silver', 'gold', 'diamond', 'premium'];
-    const lines = keys.map(key => {
-      const roleId = getConfig(`role_${message.guild.id}_${key}`, '');
-      return `**${key[0].toUpperCase() + key.slice(1)}:** ${roleId ? `<@&${roleId}>` : 'Not configured'}`;
+    const lines = ['bronze', 'silver', 'gold', 'diamond', 'premium'].map((n) => {
+      const id = getRoleId(n);
+      const role = message.guild.roles.cache.get(id);
+      return `**${n}**: ${role ? role.toString() : '`' + id + '` (not found)'}`;
     });
-    const embed = new EmbedBuilder()
-      .setTitle('Gbauto | Configuration des rôles')
-      .setDescription(lines.join('\n'))
-      .setColor(0x5865F2);
-    return message.reply({ embeds: [embed] });
-  }
 
-  // ---- !boosts set @member <1|2> ----
-  if (cmd === 'boosts' && args[0]?.toLowerCase() === 'set') {
-    if (!isAdmin) return message.reply('Administrators only.');
-    const target = message.mentions.members.first();
-    const count = Number(args[2]);
-    if (!target || ![1, 2].includes(count)) return message.reply('Usage: `!boosts set @member 1` or `!boosts set @member 2`. Use 2 for two or more active boosts.');
-    if (!target.premiumSince) return message.reply('That member is not currently boosting this server.');
-    setConfig(`boost_count_${message.guild.id}_${target.id}`, count);
-    await syncMemberRoles(target);
-    return message.reply(`Confirmed ${count === 2 ? '2+ active boosts' : '1 active boost'} for ${target}. Their boost role is now **${count === 2 ? 'Gold' : 'Silver'}**.`);
+    const embed = new EmbedBuilder()
+      .setTitle('Role Configuration')
+      .setDescription(lines.join('\n'))
+      .setColor(0xFEE75C);
+
+    return message.reply({ embeds: [embed] });
   }
 
   // ---- !bronze|silver|gold|diamond|premium set <id> ----
@@ -411,7 +380,7 @@ client.on(Events.MessageCreate, async (message) => {
 
     const roleId = args[1];
     if (!roleId || !/^\d{17,20}$/.test(roleId)) {
-      return message.reply(`Usage: !${cmd} set <roleId>`);
+      return message.reply(`Usage: \`!${cmd} set <roleId>\``);
     }
 
     const role = message.guild.roles.cache.get(roleId);
@@ -431,12 +400,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   const member = interaction.member;
   if (!member) {
-    return interaction.editReply('Could not retrieve your server member profile.');
+    return interaction.editReply('Could not retrieve your member profile.');
   }
 
-  // Refresh the member to get the latest premiumSince value
   const freshMember = await interaction.guild.members.fetch(member.id).catch(() => member);
-
   const result = await syncMemberRoles(freshMember);
 
   if (interaction.customId === 'claim_invites') {
@@ -444,14 +411,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (roleName) {
       await interaction.editReply(
         `You have **${result.inviteCount}** active invites.\n` +
-        `Eligible role granted / verified: **${roleName}**.\n` +
-        `Currently eligible roles: ${result.wantedRoles.join(', ') || 'none'}`
+          `Role granted / verified: **${roleName}**.\n` +
+          `Currently eligible roles: ${result.wantedRoles.join(', ') || 'none'}`
       );
     } else {
       await interaction.editReply(
         `You have **${result.inviteCount}** active invites.\n` +
-        `You need at least **5** for Bronze.\n` +
-        `(Only invited members who are still in the server count.)`
+          `You need at least **5** for Bronze.\n` +
+          `(Only invited members who are still in the server count.)`
       );
     }
   } else {
@@ -459,14 +426,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (result.isBoosting) {
       await interaction.editReply(
         `You are currently boosting this server.\n` +
-        `Confirmed boost count: **${result.confirmedBoostCount >= 2 ? '2+' : '1'}**.\n` +
-        `Boost role granted / verified: **${result.confirmedBoostCount >= 2 ? 'Gold' : 'Silver'}**.\n\n` +
-        `*Discord does not expose each member's exact boost count to bots. An administrator can confirm 2+ boosts with the command !boosts set @member 2.*`
+          `**Silver** role granted / verified.\n\n` +
+          `If you have **2 boosts**, please **open a ticket** so staff can verify and grant the appropriate reward.\n\n` +
+          `*Discord does not let bots see how many boosts each member has applied (1 vs 2+). Only active boosting is detected automatically.*`
       );
     } else {
       await interaction.editReply(
         `You are not currently boosting this server.\n` +
-        `Boost the server to earn **Silver** (or **Gold** with 2+ confirmed boosts).`
+          `Boost the server once to claim **Silver**.\n` +
+          `If you plan to apply **2 boosts**, open a ticket after boosting for staff verification.`
       );
     }
   }
