@@ -2,59 +2,62 @@
 
 Gbauto assigns and removes roles based on **active invites** and **active server boosts**.
 
-## Role thresholds
+**Only the highest eligible role is kept** (roles do not stack).
+
+## Default thresholds
 
 | Role | Active invites | Boosts |
 |------|----------------|--------|
 | Bronze | 5+ | — |
-| Silver | 10+ | 1 active boost (claim button) |
-| Gold | 20+ | — |
+| Silver | 10+ | 1 active boost |
+| Gold | 20+ | 2 boosts (staff: `!boost confirm`) |
 | Premium | 33+ | — |
-| Diamond | configurable | — |
+| Diamond | disabled by default | — |
 
-Invite counts only include members who are **still in the server**.
+Invite counts only include members who are **still in the server**. Thresholds are configurable with `!threshold`.
 
 ### Boosts
 
-- **1 boost** → claim with the button → **Silver**
-- **2 boosts** → open a **ticket** for staff verification (bots cannot see exact boost count per user)
-
-Roles are removed automatically when the member is no longer eligible (invited members left or boost removed).
+- **1 boost** → claim button → **Silver** (if higher than invite role)
+- **2 boosts** → open a ticket → staff runs `!boost confirm @user` → **Gold**
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `!panel` | Post the interactive rewards panel (admin) |
-| `!invites [@member]` | Show active invite count |
-| `!config` | Show configured role IDs (admin) |
-| `!bronze set <roleId>` | Set Bronze role ID (admin) |
-| `!silver set <roleId>` | Set Silver role ID (admin) |
-| `!gold set <roleId>` | Set Gold role ID (admin) |
-| `!diamond set <roleId>` | Set Diamond role ID (admin) |
-| `!premium set <roleId>` | Set Premium role ID (admin) |
-| `!help` | List available commands |
+| `!panel` | Post the rewards panel (admin) |
+| `!invites [@member]` | Active invite count + progress |
+| `!leaderboard` / `!top` | Top 10 inviters |
+| `!config` | Roles, thresholds, log channel (admin) |
+| `!log set #channel` | Set log channel (admin) |
+| `!log off` | Disable logs (admin) |
+| `!boost confirm @member` | Confirm 2 boosts → Gold (admin) |
+| `!boost revoke @member` | Remove boost confirmation (admin) |
+| `!threshold` | List invite thresholds (admin) |
+| `!threshold set <role> <n>` | Set threshold, 0 = off (admin) |
+| `!bronze set <roleId>` | Set role ID (also silver/gold/diamond/premium) |
+| `!help` | List commands |
 
-## Required bot permissions
+## Logs
 
-- Manage Roles
-- Manage Server (to fetch invites)
-- View Channels, Send Messages, Embed Links
-- Read Message History
+When a log channel is set, the bot posts:
+- Member joined / left (with inviter)
+- Role granted / updated / removed
+- Boost started / ended
+- Boost confirm / revoke
 
-**Gateway intents:** Guilds, GuildMembers, GuildInvites, GuildMessages, MessageContent
+## Required permissions
 
-## Installation (Railway)
+- Manage Roles, Manage Server
+- View Channels, Send Messages, Embed Links, Read Message History
 
-1. Railway → New Project → Deploy from GitHub → select this repo
-2. Set environment variable: `DISCORD_TOKEN`
-3. Optional: `ROLE_BRONZE`, `ROLE_SILVER`, `ROLE_GOLD`, `ROLE_DIAMOND`, `ROLE_PREMIUM`
-4. Deploy
+**Intents:** Guilds, GuildMembers, GuildInvites, GuildMessages, MessageContent
 
-Place the bot role **above** the reward roles in the server hierarchy.
+## Railway
 
-## Technical notes
+1. Deploy from GitHub
+2. Env: `DISCORD_TOKEN`
+3. Optional: `ROLE_BRONZE`, `ROLE_SILVER`, etc.
+4. Put the bot role **above** reward roles
 
-- SQLite storage in `data/bot.db`
-- Panel buttons: **Claim Invites** and **Claim Boost**
-- All user-facing text is in English
+SQLite data lives in `data/bot.db` — use a persistent volume on Railway so data survives redeploys.
